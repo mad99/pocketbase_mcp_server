@@ -35,7 +35,6 @@ class PocketBaseMCPServer {
     // Initialize PocketBase client
     const pbUrl = process.env.POCKETBASE_URL || 'http://127.0.0.1:8090';
     this.pb = new PocketBase(pbUrl);
-
     this.setupToolHandlers();
   }
 
@@ -861,14 +860,18 @@ class PocketBaseMCPServer {
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
-      } catch (error) {
+      } catch (error: any) {
+        const message = error instanceof Error ? error.message : String(error);
+        const detail = error?.data ? '\nDetails:\n' + JSON.stringify(error.data, null, 2) : '';
+        const status = error?.status ? ` (HTTP ${error.status})` : '';
         return {
           content: [
             {
               type: 'text',
-              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+              text: `Error${status}: ${message}${detail}`,
             },
           ],
+          isError: true,
         };
       }
     });
@@ -918,7 +921,9 @@ class PocketBaseMCPServer {
    * Create a new collection
    */
   private async createCollection(args: any) {
-    const collection = await this.pb.collections.create(args);
+    const { schema, ...rest } = args;
+    const payload = { ...rest, ...(schema ? { fields: schema } : {}) };
+    const collection = await this.pb.collections.create(payload);
     
     return {
       content: [
@@ -935,7 +940,28 @@ class PocketBaseMCPServer {
    */
   private async updateCollection(args: any) {
     const { idOrName, data } = args;
-    const collection = await this.pb.collections.update(idOrName, data);
+    const { schema, ...restData } = data || {};
+    const newFields = schema || [];
+    
+    // Fetch existing fields to merge (PocketBase replaces fields completely on update)
+    let mergedFields = newFields;
+    if (newFields.length > 0) {
+      const existing = await this.pb.collections.getOne(idOrName);
+      const existingFields: any[] = (existing as any).fields || [];
+      // Update existing fields or append new ones
+      mergedFields = existingFields.map((ef: any) => {
+        const updated = newFields.find((nf: any) => nf.id === ef.id || nf.name === ef.name);
+        return updated ? { ...ef, ...updated } : ef;
+      });
+      // Append truly new fields (no matching id or name in existing)
+      newFields.forEach((nf: any) => {
+        const exists = existingFields.find((ef: any) => ef.id === nf.id || ef.name === nf.name);
+        if (!exists) mergedFields.push(nf);
+      });
+    }
+    
+    const payload = { ...restData, ...(mergedFields.length > 0 ? { fields: mergedFields } : {}) };
+    const collection = await this.pb.collections.update(idOrName, payload);
     
     return {
       content: [
@@ -969,7 +995,11 @@ class PocketBaseMCPServer {
    */
   private async importCollections(args: any) {
     const { collections, deleteMissing = false } = args;
-    await this.pb.collections.import(collections, deleteMissing);
+    const mapped = collections.map((c: any) => {
+      const { schema, ...rest } = c;
+      return { ...rest, ...(schema ? { fields: schema } : {}) };
+    });
+    await this.pb.collections.import(mapped, deleteMissing);
     
     return {
       content: [
@@ -2107,12 +2137,38 @@ cronAdd("0 3 * * 0", "weekly-backup-reminder", () => {
    * Start the MCP server
    */
   async run(): Promise<void> {
+    // Admin auth before accepting connections
+    // Option 1: Direct token (preferred - no network request needed)
+    if (process.env.POCKETBASE_ADMIN_TOKEN) {
+      this.pb.authStore.save(process.env.POCKETBASE_ADMIN_TOKEN, null);
+    }
+    // Option 2: Email/Password login
+    else if (process.env.POCKETBASE_ADMIN_EMAIL && process.env.POCKETBASE_ADMIN_PASSWORD) {
+      try {
+        await this.pb.collection('_superusers').authWithPassword(
+          process.env.POCKETBASE_ADMIN_EMAIL,
+          process.env.POCKETBASE_ADMIN_PASSWORD
+        );
+      } catch (err: any) {
+        if (process.env.MCP_SILENT !== 'true') {
+          console.error('Admin login failed:', err?.message || err);
+        }
+        // Continue anyway - tools will return auth errors if needed
+      }
+    }
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('PocketBase MCP server v2.1.0 running...');
+    if (process.env.MCP_SILENT !== 'true') {
+      console.error('PocketBase MCP server v2.1.0 running...');
+    }
   }
 }
 
 // Start the server
 const server = new PocketBaseMCPServer();
-server.run().catch(console.error);
+server.run().catch((err) => {
+  if (process.env.MCP_SILENT !== 'true') {
+    console.error(err);
+  }
+  process.exit(1);
+});
