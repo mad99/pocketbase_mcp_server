@@ -4,7 +4,17 @@ A comprehensive Model Context Protocol (MCP) server that provides tools for mana
 
 ## Overview
 
-This MCP server exposes PocketBase functionality as tools that can be used by any MCP-compatible client (like Claude Desktop, Cursor, or other LLM applications). It provides comprehensive access to PocketBase features with 60+ tools covering all major operations.
+This MCP server exposes PocketBase functionality as tools that can be used by any MCP-compatible client (like Claude Desktop, Cursor, KiloCode, or other LLM applications). It provides comprehensive access to PocketBase features with 60+ tools covering all major operations.
+
+## Changes in this Fork
+
+This fork adds several fixes and improvements over the original:
+
+- **KiloCode / VS Code compatibility**: Added `MCP_SILENT=true` env var to suppress stderr startup output, which caused connection errors in strict MCP clients
+- **PocketBase v0.26+ compatibility**: Fixed `schema` → `fields` mapping for `create_collection`, `update_collection`, and `import_collections`
+- **Safe collection updates**: `update_collection` now merges fields instead of replacing them completely, preventing accidental data loss
+- **Admin authentication**: Added automatic admin login on startup via `POCKETBASE_ADMIN_EMAIL`/`POCKETBASE_ADMIN_PASSWORD` or `POCKETBASE_ADMIN_TOKEN`
+- **Improved error messages**: Errors now include HTTP status codes and detailed PocketBase validation messages
 
 ## Features
 
@@ -60,14 +70,82 @@ The server can be configured to connect to different PocketBase instances using 
 1. **Local config file** (`.pocketbase-mcp.json` in your project directory):
    ```json
    {
-     "url": "http://localhost:8091"
+     "url": "http://localhost:8091",
+     "adminEmail": "admin@example.com",
+     "adminPassword": "yourpassword"
    }
    ```
 
-2. **Environment variable**:
+2. **Environment variables**:
    - `POCKETBASE_URL`: URL of your PocketBase instance
+   - `POCKETBASE_ADMIN_EMAIL` + `POCKETBASE_ADMIN_PASSWORD`: Admin credentials for auto-login
+   - `POCKETBASE_ADMIN_TOKEN`: Admin token (takes priority over email/password)
+   - `MCP_SILENT=true`: Suppress all stderr output (required for KiloCode/VS Code)
 
 3. **Default**: `http://127.0.0.1:8090`
+
+## Usage with KiloCode / VS Code
+
+Add this to your `mcp.json`:
+
+```jsonc
+{
+  "mcpServers": {
+    "pocketbase": {
+      "command": "node",
+      "args": ["/path/to/pocketbase_mcp_server/dist/mcp-server.js"],
+      "env": {
+        "POCKETBASE_URL": "http://127.0.0.1:8090",
+        "POCKETBASE_ADMIN_EMAIL": "admin@example.com",
+        "POCKETBASE_ADMIN_PASSWORD": "yourpassword",
+        "MCP_SILENT": "true"
+      },
+      "disabled": false
+    }
+  }
+}
+```
+
+Or with a token instead of email/password:
+
+```jsonc
+{
+  "mcpServers": {
+    "pocketbase": {
+      "command": "node",
+      "args": ["/path/to/pocketbase_mcp_server/dist/mcp-server.js"],
+      "env": {
+        "POCKETBASE_URL": "http://127.0.0.1:8090",
+        "POCKETBASE_ADMIN_TOKEN": "your-admin-token",
+        "MCP_SILENT": "true"
+      },
+      "disabled": false
+    }
+  }
+}
+```
+
+> **Note**: `MCP_SILENT=true` is required for KiloCode and VS Code. Without it, startup log messages on stderr will cause the MCP client to disconnect immediately.
+
+## Usage with Claude Desktop
+
+Add this configuration to your Claude Desktop MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "pocketbase": {
+      "command": "node",
+      "args": ["/path/to/pocketbase-mcp-server/dist/mcp-server.js"],
+      "env": {
+        "POCKETBASE_URL": "http://localhost:8090",
+        "POCKETBASE_ADMIN_EMAIL": "admin@example.com",
+        "POCKETBASE_ADMIN_PASSWORD": "yourpassword"
+      }
+    }
+  }
+}
+```
 
 ### Multi-Project Setup
 
@@ -121,7 +199,7 @@ Add this configuration to your Claude Desktop MCP settings:
 - `list_collections` - List all collections with pagination and filtering
 - `get_collection` - Get a specific collection by ID or name
 - `create_collection` - Create a new collection with schema
-- `update_collection` - Update collection settings and schema
+- `update_collection` - Update collection settings and schema *(note: field types cannot be changed after creation)*
 - `delete_collection` - Delete a collection
 - `import_collections` - Import multiple collections at once
 
@@ -237,18 +315,28 @@ Add this configuration to your Claude Desktop MCP settings:
     "requests": [
       {
         "collection": "posts",
-        "data": {
-          "title": "First Post",
-          "content": "Content 1"
-        }
+        "data": { "title": "First Post", "content": "Content 1" }
       },
       {
         "collection": "posts",
-        "data": {
-          "title": "Second Post",
-          "content": "Content 2"
-        }
+        "data": { "title": "Second Post", "content": "Content 2" }
       }
+    ]
+  }
+}
+```
+
+### Create Collection with Fields
+```json
+{
+  "tool": "create_collection",
+  "arguments": {
+    "name": "articles",
+    "type": "base",
+    "schema": [
+      { "name": "title", "type": "text", "required": true },
+      { "name": "body", "type": "text" },
+      { "name": "views", "type": "number" }
     ]
   }
 }
@@ -312,6 +400,22 @@ Add this configuration to your Claude Desktop MCP settings:
 }
 ```
 
+### Update Collection (add a field)
+```json
+{
+  "tool": "update_collection",
+  "arguments": {
+    "idOrName": "articles",
+    "data": {
+      "schema": [
+        { "name": "published", "type": "bool" }
+      ]
+    }
+  }
+}
+```
+> Existing fields are preserved automatically — only the fields you pass will be added or updated.
+
 ## Query Syntax
 
 The MCP server supports PocketBase's full query syntax:
@@ -366,22 +470,25 @@ The MCP server follows the Model Context Protocol specification:
 
 ## Error Handling
 
-All tools include comprehensive error handling and return descriptive error messages. Common errors include:
+All tools include comprehensive error handling and return descriptive error messages including HTTP status codes and detailed PocketBase validation errors. Common errors include:
 - Invalid authentication
 - Missing required fields
 - Network connectivity issues
 - Permission denied errors
+- Field validation failures (with specific field-level details)
 
 ## Security Considerations
 
 - Admin operations require appropriate authentication
 - Use environment variables for sensitive configuration
+- Prefer `POCKETBASE_ADMIN_TOKEN` over email/password for production setups
 - The server inherits PocketBase's security model and access rules
 - OAuth2 state parameters are handled securely
 
 ## Version Compatibility
 
 - Requires PocketBase v0.20.0 or higher
+- **PocketBase v0.26+**: Fully supported (schema→fields mapping handled automatically)
 - Uses PocketBase JavaScript SDK v0.21.0+
 - Implements MCP protocol version 1.0
 
