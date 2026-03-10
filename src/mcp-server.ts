@@ -11,6 +11,70 @@ import { z } from 'zod';
 import { promises as fs } from 'fs';
 import path from 'path';
 
+
+function normalizeField(field: any): any {
+  if (field.type === 'select') {
+    const { options, ...rest } = field;
+    return {
+      ...rest,
+      values: field.values ?? options?.values ?? [],
+      maxSelect: field.maxSelect ?? options?.maxSelect ?? 1,
+    };
+  }
+  if (field.type === 'relation') {
+    const { options, ...rest } = field;
+    return {
+      ...rest,
+      collectionId: field.collectionId ?? options?.collectionId ?? '',
+      maxSelect: field.maxSelect ?? options?.maxSelect ?? 1,
+      cascadeDelete: field.cascadeDelete ?? options?.cascadeDelete ?? false,
+    };
+  }
+  if (field.type === 'file') {
+    return {
+      ...field,
+      options: {
+        maxSelect: 1,
+        maxSize: 5242880,
+        ...field.options,
+      },
+    };
+  }
+  return field;
+}
+
+function enrichPocketBaseError(error: any, payload?: any): string {
+  const details = error?.data?.data ?? error?.data;
+  const fieldErrors = details?.fields;
+  if (!fieldErrors) return error.message;
+
+  const hints: string[] = [];
+  for (const [index, fieldError] of Object.entries(fieldErrors)) {
+    const field = payload?.fields?.[Number(index)] ?? payload?.schema?.[Number(index)];
+    const fieldName = field?.name ?? `field[${index}]`;
+    const fieldType = field?.type ?? 'unknown';
+    const errorCode = (fieldError as any)?.values?.code ?? (fieldError as any)?.code;
+
+    if (errorCode === 'validation_required') {
+      if (fieldType === 'select') {
+        hints.push(`Field "${fieldName}" (select): missing required "maxSelect". Use: { "values": [...], "maxSelect": 1 }`);
+      } else if (fieldType === 'relation') {
+        hints.push(`Field "${fieldName}" (relation): missing required options. Use: { "collectionId": "<id>", "maxSelect": 1, "cascadeDelete": false }`);
+      } else if (fieldType === 'file') {
+        hints.push(`Field "${fieldName}" (file): missing required options. Use: { "maxSelect": 1, "maxSize": 5242880 }`);
+      } else {
+        hints.push(`Field "${fieldName}" (${fieldType}): validation_required – check all required options are set.`);
+      }
+    }
+  }
+
+  if (hints.length === 0) return error.message;
+
+  return `Failed to create/update collection. Fix these field definitions and retry:\n`
+    + hints.map((h, i) => `  ${i + 1}. ${h}`).join('\n')
+    + `\n\nRule: PocketBase requires specific options per field type. Never omit "maxSelect" for select/relation/file fields.`;
+}
+
 /**
  * PocketBase MCP Server
  * Provides comprehensive tools for managing PocketBase instances through the Model Context Protocol
@@ -71,7 +135,7 @@ class PocketBaseMCPServer {
       },
       {
         name: 'create_collection',
-        description: 'Create a new collection',
+        description: 'Create a new collection. IMPORTANT – required options per field type: select: { "values": [...], "maxSelect": 1 } | relation: { "collectionId": "<id>", "maxSelect": 1, "cascadeDelete": false } | file: { "maxSelect": 1, "maxSize": 5242880 } | number: { "min": null, "max": null }. Omitting these causes validation errors.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -922,17 +986,16 @@ class PocketBaseMCPServer {
    */
   private async createCollection(args: any) {
     const { schema, ...rest } = args;
-    const payload = { ...rest, ...(schema ? { fields: schema } : {}) };
-    const collection = await this.pb.collections.create(payload);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(collection, null, 2),
-        },
-      ],
-    };
+    const normalizedFields = (schema || []).map(normalizeField);
+    const payload = { ...rest, ...(normalizedFields.length > 0 ? { fields: normalizedFields } : {}) };
+    try {
+      const collection = await this.pb.collections.create(payload);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(collection, null, 2) }],
+      };
+    } catch (error: any) {
+      throw new Error(enrichPocketBaseError(error, payload));
+    }
   }
 
   /**
@@ -941,36 +1004,31 @@ class PocketBaseMCPServer {
   private async updateCollection(args: any) {
     const { idOrName, data } = args;
     const { schema, ...restData } = data || {};
-    const newFields = schema || [];
-    
-    // Fetch existing fields to merge (PocketBase replaces fields completely on update)
+    const newFields = (schema || []).map(normalizeField);
+
     let mergedFields = newFields;
     if (newFields.length > 0) {
       const existing = await this.pb.collections.getOne(idOrName);
       const existingFields: any[] = (existing as any).fields || [];
-      // Update existing fields or append new ones
       mergedFields = existingFields.map((ef: any) => {
         const updated = newFields.find((nf: any) => nf.id === ef.id || nf.name === ef.name);
-        return updated ? { ...ef, ...updated } : ef;
+        return updated ? normalizeField({ ...ef, ...updated }) : ef;
       });
-      // Append truly new fields (no matching id or name in existing)
       newFields.forEach((nf: any) => {
         const exists = existingFields.find((ef: any) => ef.id === nf.id || ef.name === nf.name);
-        if (!exists) mergedFields.push(nf);
+        if (!exists) mergedFields.push(normalizeField(nf));
       });
     }
-    
+
     const payload = { ...restData, ...(mergedFields.length > 0 ? { fields: mergedFields } : {}) };
-    const collection = await this.pb.collections.update(idOrName, payload);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(collection, null, 2),
-        },
-      ],
-    };
+    try {
+      const collection = await this.pb.collections.update(idOrName, payload);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(collection, null, 2) }],
+      };
+    } catch (error: any) {
+      throw new Error(enrichPocketBaseError(error, payload));
+    }
   }
 
   /**

@@ -15,6 +15,9 @@ This fork adds several fixes and improvements over the original:
 - **Safe collection updates**: `update_collection` now merges fields instead of replacing them completely, preventing accidental data loss
 - **Admin authentication**: Added automatic admin login on startup via `POCKETBASE_ADMIN_EMAIL`/`POCKETBASE_ADMIN_PASSWORD` or `POCKETBASE_ADMIN_TOKEN`
 - **Improved error messages**: Errors now include HTTP status codes and detailed PocketBase validation messages
+- **PocketBase v0.26+ field format**: Automatic normalization of `options`-wrapper format to flat field format for `relation`, `select`, and `file` fields (breaking change in PocketBase v0.26+)
+- **Safe field defaults**: `select` fields auto-get `maxSelect: 1`, `relation` fields auto-get `maxSelect: 1` and `cascadeDelete: false`, `file` fields auto-get `maxSelect: 1` and `maxSize: 5242880`
+- **LLM-friendly error messages**: Validation errors now include field-specific hints with correct format examples
 
 ## Features
 
@@ -342,6 +345,38 @@ Add this configuration to your Claude Desktop MCP settings:
 }
 ```
 
+### Relation Field (old and new format both work)
+```json
+{
+  "tool": "create_collection",
+  "arguments": {
+    "name": "posts",
+    "type": "base",
+    "schema": [
+      {
+        "name": "author",
+        "type": "relation",
+        "options": {
+          "collectionId": "_pb_users_auth_",
+          "maxSelect": 1,
+          "cascadeDelete": false
+        },
+        "required": true
+      },
+      {
+        "name": "status",
+        "type": "select",
+        "options": {
+          "values": ["draft", "published", "archived"],
+          "maxSelect": 1
+        }
+      }
+    ]
+  }
+}
+```
+> The server automatically normalizes `options`-wrapped fields to PocketBase v0.26+ flat format. Both old and new field formats are accepted.
+
 ### OAuth2 Authentication
 ```json
 {
@@ -488,8 +523,8 @@ All tools include comprehensive error handling and return descriptive error mess
 ## Version Compatibility
 
 - Requires PocketBase v0.20.0 or higher
-- **PocketBase v0.26+**: Fully supported (schema→fields mapping handled automatically)
-- Uses PocketBase JavaScript SDK v0.21.0+
+- **PocketBase v0.36+**: Fully supported — flat field format handled automatically
+- Uses PocketBase JavaScript SDK v0.26.8
 - Implements MCP protocol version 1.0
 
 ## Contributing
